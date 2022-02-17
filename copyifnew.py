@@ -11,138 +11,202 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
-from shutil import copytree, copy2, rmtree, move
+from shutil import copytree, copy2, rmtree, move, copymode, copystat
 from argparse import ArgumentParser
-from os import path, remove, makedirs, walk
-from filecmp import dircmp, cmp
+from os import path, remove, makedirs, walk, mkdir, umask
+from l_filecmp import dircmp, filecmp
+from time import time
 
-version = '0.1.5'
+version = '0.3.0'
 
 def printifverbose(string, vlevel):
   if args.verb >= vlevel:
     print(string)
 
+def makedirs_mode(source, target):
+  mysource = path.abspath(source).split('/')
+  mytarget = path.abspath(target).split('/')
+  commons = 0
+  while (mysource[-1*(commons+1)] == mytarget[-1*(commons+1)]) and (commons < min(len(mysource), len(mytarget))):
+    commons += 1
+  if commons:
+    targetline =  '/'.join(mytarget[:(-1*commons)])
+    sourceline =  '/'.join(mysource[:(-1*commons)])
+  else:
+    targetline =  '/'.join(mytarget)
+    sourceline =  '/'.join(mysource)
+  if (not path.exists(targetline)):
+    makedirs(targetline)
+  for i in range(commons):
+    targetline += ('/' + mytarget[i-commons])
+    sourceline += ('/' + mysource[i-commons])
+    if (not path.exists(targetline)):
+      oldmask = umask(000)
+      mkdir(targetline, 0o0777)
+      copymode(sourceline, targetline)
+      umask(oldmask)
 
-def process_one(source, target, diff, dcompobj=None):
+def process_one(source, target, diffdir=None):
   if path.isfile(source):
     printifverbose('Checking File: ' + source, 4)
     if path.exists(target):
-      if not cmp(source, target):
+      if not filecmp(source, target):
         printifverbose('Updating File: ' + target, 2)
-        try:
-          copy2(source, target)
-        except PermissionError:
-          printifverbose('*** Permission Error', 1)
+        if diffdir:
+          makedirs_mode(path.dirname(target), diffdir + path.abspath(path.dirname(source)))
+          copy2(target, diffdir + path.abspath(source))
+          copymode(target, diffdir + path.abspath(source))
+        if args.verb >= 7:
+          ts = time()
+        copy2(source, target)
+        if args.verb >= 7:
+          print('*** Timing copy2', time() - ts)
+          ts = time()
+        copymode(source, target)
+        if args.verb >= 7:
+          print('*** Timing copymode', time() - ts)
     else:
       printifverbose('Creating File: ' + target, 2)
-      try:
-        makedirs(path.dirname(target), exist_ok=True)
-        copy2(source, target)
-      except PermissionError:
-        printifverbose('*** Permission Error', 1)
-  else:
+      if args.verb >= 7:
+        ts = time()
+      makedirs_mode(path.dirname(source), path.dirname(target))
+      if args.verb >= 7:
+        print('*** Timing makedirs_mode', time() - ts)
+        ts = time()
+      copy2(source, target)
+      if args.verb >= 7:
+        print('*** Timing copy2', time() - ts)
+        ts = time()
+      copymode(source, target)
+      if args.verb >= 7:
+        print('*** Timing copymode', time() - ts)
+  elif path.isdir(source):
     printifverbose('Checking Dir: ' + source, 4)
     if not path.exists(target):
-      makedirs(target)
-    if dcompobj is None:
-      dcmp = dircmp(source, target)
-    else:
-      dcmp = dcompobj 
-    printifverbose(('Source only: ' + str(len(dcmp.left_only)) + '   '
-      + 'Target only: ' + str(len(dcmp.right_only)) + '   '
-      + 'Same files: ' + str(len(dcmp.same_files)) + '   '
-      + 'Different files: ' + str(len(dcmp.diff_files)))
-      , 5)
-    if (len(dcmp.common_dirs) > 0) and (args.verb >= 5):
-      print('***',dcmp.common_dirs)
-    try:
-      my_right_only = dcmp.right_only
-    except PermissionError:
-      printifverbose('*** Permission Error while scanning Dir', 1)
-      my_right_only = []
-    for i in my_right_only:
-      newtarget = target+'/'+i
-      if dodiff:
-        newdiff = diff+'/'+i
-      if path.isfile(newtarget):
-        if dodiff:
-          makedirs(path.dirname(newdiff), exist_ok=True)
-          copy2(newtarget, newdiff)
-        printifverbose('Deleting File: ' + newtarget, 2)
-        remove(newtarget)
-      elif path.isdir(newtarget):
-        if dodiff:
-          makedirs(newdiff, exist_ok=True)
-          rmtree(newdiff)
-          copytree(newtarget,newdiff)
-        printifverbose('Deleting Dir: ' + newtarget, 2)
-        rmtree(newtarget)
-
-    try:
-      my_left_only = dcmp.left_only
-    except PermissionError:
-      printifverbose('*** Permission Error while scanning Dir', 1)
-      my_left_only = []
-    for i in my_left_only:
-      newsource = source+'/'+i
-      newtarget = target+'/'+i
-      if dodiff:
-        newdiff = diff+'/'+i
+      makedirs_mode(source, target)
+    if args.verb >= 7:
+      ts = time()
+    dcmp = dircmp(source, target)
+    if args.verb >= 7:
+      print('*** Timing dircmp', time() - ts)
+    printifverbose('Directories:', 5)
+    printifverbose('Source only: ' + str(dcmp.results['dirleft']), 5)
+    printifverbose('Both: ' + str(dcmp.results['dirboth']), 5)
+    printifverbose('Target only: ' + str(dcmp.results['dirright']), 5)
+    printifverbose('Files:', 5)
+    printifverbose('Source only: ' + str(dcmp.results['fileleft']), 5)
+    printifverbose('Equal: ' + str(dcmp.results['fileequal']), 5)
+    printifverbose('Different: ' + str(dcmp.results['filedifferent']), 5)
+    printifverbose('Target only: ' + str(dcmp.results['fileright']), 5)
+    for item in (dcmp.results['dirleft']):
+      skipit = False
+      if exclude is not None:
+        for exitem in exclude:
+          if path.abspath(source + '/' + item) == path.abspath(exitem):
+            skipit = True
+      if keywordex is not None:
+        for exitem in keywordex:
+          if item == exitem:
+            skipit = True
+      if skipit:
+        printifverbose('Skipped Dir:' + source + '/' + item, 3)
       else:
-        newdiff = None
-      if path.islink(newsource):
-        printifverbose('Did not follow link:' + newsource, 1)
+        printifverbose('Creating Dir: ' + target + '/' + item, 2)
+        if args.verb >= 7:
+          ts = time()
+        mkdir(target + '/' + item)
+        if args.verb >= 7:
+          print('*** Timing mkdir', time() - ts)
+          ts = time()
+        copymode(source + '/' + item, target + '/' + item)
+        if args.verb >= 7:
+          print('*** Timing copymode', time() - ts)
+        if diffdir:
+          process_one(source + '/' + item, target + '/' + item, diffdir + '/' + item)
+        else:
+          process_one(source + '/' + item, target + '/' + item)
+    for item in (dcmp.results['dirboth']):
+      if diffdir:
+        process_one(source + '/' + item, target + '/' + item, diffdir + '/' + item)
       else:
-        newtarget = target+'/'+i
-        if path.isfile(newsource):
-          printifverbose('Creating File: ' + newtarget, 2)
-          try:
-            copy2(newsource, target)
-          except PermissionError:
-            printifverbose('*** Permission Error', 1)
-        elif path.isdir(newsource):
-          skipit = False
-          if exclude is not None:
-            for item in exclude:
-              if path.abspath(newsource) == item:
-                skipit = True
-          if keywordex is not None:
-            for item in keywordex:
-              if newsource[(-1*len(item)-1):] == ('/'+item):
-                skipit = True
-          if skipit:
-            printifverbose('Skipped Dir:' + newsource, 3)
-          else:
-            printifverbose('Creating Dir: ' + newtarget, 2)
-            process_one(newsource, newtarget, newdiff)
-
-    try:
-      my_diff_files = dcmp.diff_files
-    except PermissionError:
-      printifverbose('*** Permission Error while scanning Dir', 1)
-      my_diff_files = []
-    for i in my_diff_files:
-      newsource = source+'/'+i
-      newtarget = target+'/'+i
-      if dodiff:
-        newdiff = diff+'/'+i
-        makedirs(path.dirname(newdiff), exist_ok=True)
-        copy2(newtarget, newdiff)
-      printifverbose('Updating File: ' + newtarget, 2)
-      try:
-        copy2(newsource, target)
-      except PermissionError:
-        printifverbose('*** Permission Error', 1)
-
-    for i in dcmp.common_dirs:
-      newsource = source+'/'+i
-      newtarget = target+'/'+i
-      if dodiff:
-        newdiff = diff+'/'+i
-        process_one(newsource, newtarget, newdiff, dcmp.subdirs[i])
+        process_one(source + '/' + item, target + '/' + item)
+    for item in (dcmp.results['dirright']):
+      if diffdir:
+        if not path.exists(diffdir + path.abspath(source)):
+          makedirs_mode(target, diffdir + path.abspath(source))
+        elif path.exists(diffdir + path.abspath(source) + '/' + item):
+          rmtree(diffdir + path.abspath(source) + '/' + item)
+        copytree(target + '/' + item, diffdir + path.abspath(source) + '/' + item)
+        copymode(target + '/' + item, diffdir + path.abspath(source) + '/' + item)
+      printifverbose('Deleting Dir: ' + target + '/' + item, 2)
+      if args.verb >= 7:
+        ts = time()
+      rmtree(target + '/' + item)
+      if args.verb >= 7:
+        print('*** Timing rmtree', time() - ts)
+    for item in (dcmp.results['fileleft']):
+      skipit = False
+      if exclude is not None:
+        for exitem in exclude:
+          if path.abspath(source + '/' + item) == path.abspath(exitem):
+            skipit = True
+      if keywordex is not None:
+        for exitem in keywordex:
+          if item == exitem:
+            skipit = True
+      if skipit:
+        printifverbose('Skipped File:' + source + '/' + item, 3)
       else:
-        process_one(newsource, newtarget, None, dcmp.subdirs[i])
-
+        printifverbose('Creating File: ' + target + '/' + item, 2)
+        if args.verb >= 7:
+          ts = time()
+        copy2(source + '/' + item, target + '/' + item)
+        if args.verb >= 7:
+          print('*** Timing copy2', time() - ts)
+          ts = time()
+        copymode(source + '/' + item, target + '/' + item)
+        if args.verb >= 7:
+          print('*** Timing copymode', time() - ts)
+    for item in (dcmp.results['filedifferent']):
+      skipit = False
+      if exclude is not None:
+        for exitem in exclude:
+          if path.abspath(source + '/' + item) == path.abspath(exitem):
+            skipit = True
+      if keywordex is not None:
+        for exitem in keywordex:
+          if item == exitem:
+            skipit = True
+      if skipit:
+        printifverbose('Skipped File:' + source + '/' + item, 3)
+      else:
+        if diffdir:
+          if not path.exists(diffdir + path.abspath(source)):
+            makedirs_mode(target, diffdir + path.abspath(source))
+          copy2(target + '/' + item, diffdir + path.abspath(source) + '/' + item)
+          copymode(target + '/' + item, diffdir + path.abspath(source) + '/' + item)
+        printifverbose('Updating File: ' + target + '/' + item, 2)
+        if args.verb >= 7:
+          ts = time()
+        copy2(source + '/' + item, target + '/' + item)
+        if args.verb >= 7:
+          print('*** Timing copy2', time() - ts)
+          ts = time()
+        copymode(source + '/' + item, target + '/' + item)
+        if args.verb >= 7:
+          print('*** Timing copymode', time() - ts)
+    for item in (dcmp.results['fileright']):
+      if diffdir:
+        if not path.exists(diffdir + path.abspath(source)):
+          makedirs_mode(target, diffdir + path.abspath(source))
+        copy2(target + '/' + item, diffdir + path.abspath(source) + '/' + item)
+        copymode(target + '/' + item, diffdir + path.abspath(source) + '/' + item)
+      printifverbose('Deleting File: ' + target + '/' + item, 2)
+      if args.verb >= 7:
+        ts = time()
+      remove(target + '/' + item)
+      if args.verb >= 7:
+        print('*** Timing remove', time() - ts)
 
 parser = ArgumentParser()
 parser.add_argument("-s", "--source", dest="sourcedir", default = "")
@@ -154,7 +218,6 @@ parser.add_argument("-e", "--exclude", dest="exclude")
 parser.add_argument("-k", "--keywordex", dest="keywordex")
 args = parser.parse_args()
 
-dodiff = (args.diffdir is not None)
 sourcedir = args.sourcedir
 
 if args.exclude is None:
@@ -169,7 +232,7 @@ else:
 
 if path.exists(sourcedir):	
   targetdir = args.targetdir
-  if dodiff:
+  if args.diffdir:
     diffdir = args.diffdir
     numdiff = args.numdiff
     printifverbose('copyifnew:  source = '+sourcedir+'  target = '+targetdir
@@ -181,9 +244,10 @@ if path.exists(sourcedir):
     copytarget = diffdir+'/'+str(numdiff)	
     for root, _, files in walk(copysource):
       rootto = root.replace(copysource, copytarget, 1)
-      makedirs(rootto, exist_ok=True)
+      makedirs_mode(root, rootto)
       for file in files:
         copy2(root+'/'+file, rootto+'/'+file)
+        copymode(root+'/'+file, rootto+'/'+file)
 
 
     if path.exists(diffdir+'/'+str(numdiff-1)):	
@@ -196,7 +260,7 @@ if path.exists(sourcedir):
   else:
     printifverbose('copyifnew:  source = '+sourcedir+'  target = '+targetdir, 1)
     printifverbose('version: '+version, 1)
-    process_one(sourcedir, targetdir, None)
+    process_one(sourcedir, targetdir)
 
 
   printifverbose('Done...', 1)
